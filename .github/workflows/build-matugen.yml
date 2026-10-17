@@ -52,14 +52,30 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.v.outputs.version }}
         run: |
-          $tag = "v${{ steps.v.outputs.version }}"
+          # 这里刻意不用 gh CLI：
+          #   1) 原生命令（gh/cargo/...）失败时 PowerShell 不会抛异常，try/catch 抓不住，
+          #      会导致"没找到 Release"却被判成"已存在"（第一版就是这么坏的）
+          #   2) 原生命令留下的 $LASTEXITCODE 会被 Actions 的 pwsh 包装器当成步骤退出码
+          # Invoke-RestMethod 配 -ErrorAction Stop，对 404 是会正常抛异常的。
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept        = 'application/vnd.github+json'
+          }
+          $uri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG"
           $exists = $false
           try {
-            gh release view $tag --repo $env:GITHUB_REPOSITORY | Out-Null
+            Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 30 -ErrorAction Stop | Out-Null
             $exists = $true
-          } catch { $exists = $false }
-          Write-Host "版本 $tag 已存在: $exists"
+          }
+          catch {
+            $code = $null
+            try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+            if ($code -eq 404) { $exists = $false }
+            else { throw "查询 Release 失败（HTTP $code）：$($_.Exception.Message)" }
+          }
+          Write-Host "版本 $($env:TAG) 已存在: $exists"
           "exists=$($exists.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       - name: 安装 Rust
@@ -97,6 +113,7 @@ jobs:
           Get-ChildItem dist | ForEach-Object { Write-Host ("  {0,-34} {1:N1} MB" -f $_.Name, ($_.Length / 1MB)) }
           Write-Host "--- 自检 ---"
           & dist\matugen.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "matugen.exe 跑不起来" }
 
       - name: 上传 artifact（不依赖 Release，90 天有效）
         if: steps.check.outputs.exists == 'false'
